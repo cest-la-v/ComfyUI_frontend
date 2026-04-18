@@ -1859,6 +1859,7 @@ export class LGraphCanvas implements CustomEventDispatcher<LGraphCanvasEventMap>
     this.highlighted_links = {}
 
     this.dragging_canvas = false
+    this.state.ghostNodeId = null
 
     this._dirty()
     this.dirty_area = null
@@ -3694,6 +3695,8 @@ export class LGraphCanvas implements CustomEventDispatcher<LGraphCanvasEventMap>
     // Cancel any in-flight ghost so we don't leak its listeners
     if (this.state.ghostNodeId != null) this.finalizeGhostPlacement(true)
 
+    // Open the undo transaction before any canvas interaction so that
+    // finalizeGhostPlacement()'s emitAfterChange() correctly closes it.
     this.emitBeforeChange()
     this.graph?.beforeChange()
 
