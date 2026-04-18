@@ -10,7 +10,12 @@ import { syncLayoutStoreNodeBoundsFromGraph } from '@/renderer/core/layout/sync/
 import { flushScheduledSlotLayoutSync } from '@/renderer/extensions/vueNodes/composables/useSlotElementTracking'
 
 import { st, t } from '@/i18n'
-import { ChangeTracker } from '@/scripts/changeTracker'
+import {
+  debugLoadGraphData,
+  finishLoading,
+  incrementEpoch,
+  setOwner
+} from '@/platform/changeTracking'
 import type { IContextMenuValue } from '@/lib/litegraph/src/interfaces'
 import {
   LGraph,
@@ -1160,6 +1165,12 @@ export class ComfyApp {
       useMissingMediaStore().clearMissingMedia()
     }
 
+    const _wfPath =
+      typeof workflow === 'string' ? workflow : (workflow?.path ?? '(null)')
+    const _epoch = incrementEpoch()
+    debugLoadGraphData(_wfPath, clean, _epoch)
+    setOwner(null)
+
     if (clean !== false) {
       // Reset canvas context before configuring a new graph so subgraph UI
       // state from the previous workflow cannot leak into the newly loaded
@@ -1168,6 +1179,11 @@ export class ComfyApp {
       this.canvas.setGraph(this.rootGraph)
 
       this.clean()
+    } else {
+      // Even on undo/redo (clean=false), reset canvas rendering state before
+      // reconfiguring. Without this, removed nodes linger in selected_nodes and
+      // are drawn as ghost shadows on the next render frame.
+      this.canvas.clear()
     }
 
     let reset_invalid_values = false
@@ -1315,7 +1331,6 @@ export class ComfyApp {
       }
     }
 
-    ChangeTracker.isLoadingGraph = true
     try {
       let normalizedMainGraph = false
       try {
@@ -1342,6 +1357,24 @@ export class ComfyApp {
         }
 
         if (canvasVisible) fitView()
+
+        // Immediately restore the per-workflow viewport (scale + offset) so the
+        // browser never paints an intermediate viewport state between fitView()
+        // and the async restore() call in afterLoadNewGraph.  restore() will
+        // run again later but will be a no-op because the same values are already
+        // applied.
+        if (
+          canvasVisible &&
+          workflow &&
+          typeof workflow !== 'string' &&
+          workflow.changeTracker?.ds
+        ) {
+          this.canvas.ds.scale = workflow.changeTracker.ds.scale
+          this.canvas.ds.offset = [...workflow.changeTracker.ds.offset] as [
+            number,
+            number
+          ]
+        }
       } catch (error) {
         useDialogService().showErrorDialog(error, {
           title: t('errorDialog.loadWorkflowTitle'),
@@ -1470,7 +1503,7 @@ export class ComfyApp {
         this.canvas.setDirty(true, true)
       })
     } finally {
-      ChangeTracker.isLoadingGraph = false
+      finishLoading()
     }
   }
 

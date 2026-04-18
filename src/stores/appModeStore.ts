@@ -15,7 +15,7 @@ import { useCanvasStore } from '@/renderer/core/canvas/canvasStore'
 import { useWorkflowStore } from '@/platform/workflow/management/stores/workflowStore'
 import { useSidebarTabStore } from '@/stores/workspace/sidebarTabStore'
 import { app } from '@/scripts/app'
-import { ChangeTracker } from '@/scripts/changeTracker'
+import { isLoading } from '@/platform/changeTracking'
 import { isPromotedWidgetView } from '@/core/graph/subgraph/promotedWidgetTypes'
 import type { IBaseWidget } from '@/lib/litegraph/src/types/widgets'
 import { resolveNode } from '@/utils/litegraphUtil'
@@ -85,7 +85,7 @@ export const useAppModeStore = defineStore('appMode', () => {
         ? { inputs: selectedInputs.value, outputs: selectedOutputs.value }
         : null,
     (data) => {
-      if (!data || ChangeTracker.isLoadingGraph) return
+      if (!data || isLoading()) return
       const graph = app.rootGraph
       if (!graph) return
       const extra = (graph.extra ??= {})

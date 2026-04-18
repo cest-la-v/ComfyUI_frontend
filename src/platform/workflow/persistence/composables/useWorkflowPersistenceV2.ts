@@ -37,6 +37,7 @@ import { useSharedWorkflowUrlLoader } from '@/platform/workflow/sharing/composab
 import { useTemplateUrlLoader } from '@/platform/workflow/templates/composables/useTemplateUrlLoader'
 import { api } from '@/scripts/api'
 import { app as comfyApp } from '@/scripts/app'
+import { isLoading, isOwner } from '@/platform/changeTracking'
 import { useCommandStore } from '@/stores/commandStore'
 
 export function useWorkflowPersistenceV2() {
@@ -92,8 +93,16 @@ export function useWorkflowPersistenceV2() {
 
   const persistCurrentWorkflow = () => {
     if (!workflowPersistenceEnabled.value) return
+    // Skip during any graph load (tab switch, undo/redo, new workflow). A debounced
+    // call from a prior graphChanged event could fire while the graph is mid-configure,
+    // capturing an incomplete or wrong state.
+    if (isLoading()) return
     const activeWorkflow = workflowStore.activeWorkflow
     if (!activeWorkflow) return
+    // Only persist if rootGraph actually contains this workflow's data.
+    // During async transitions, activeWorkflow can switch before rootGraph
+    // is reconfigured, which would write the wrong content to this path.
+    if (!isOwner(activeWorkflow.path)) return
 
     const graphData = comfyApp.rootGraph.serialize()
     const workflowJson = JSON.stringify(graphData)
@@ -205,6 +214,12 @@ export function useWorkflowPersistenceV2() {
     () => workflowStore.activeWorkflow?.key,
     (activeWorkflowKey) => {
       if (!activeWorkflowKey) return
+      // Always update session path immediately, even when isLoading() blocks
+      // persistCurrentWorkflow(). Without this, tabState retains the previous
+      // workflow's path until the debounce fires (~512ms), causing the wrong
+      // workflow to be restored on page refresh if the browser closes first.
+      const activePath = workflowStore.activeWorkflow?.path
+      if (activePath) tabState.setActivePath(activePath)
       // Flush any pending persistence from the previous workflow
       debouncedPersist.flush()
       // Persist the new workflow immediately

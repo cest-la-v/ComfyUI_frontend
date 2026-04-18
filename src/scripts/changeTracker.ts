@@ -1,11 +1,24 @@
-import _ from 'es-toolkit/compat'
 import * as jsondiffpatch from 'jsondiffpatch'
 import log from 'loglevel'
 
 import type { CanvasPointerEvent } from '@/lib/litegraph/src/litegraph'
 import { LGraphCanvas, LiteGraph } from '@/lib/litegraph/src/litegraph'
-import type { ComfyWorkflow } from '@/platform/workflow/management/stores/workflowStore'
-import { useWorkflowStore } from '@/platform/workflow/management/stores/workflowStore'
+import {
+  type ChangeOrigin,
+  debugBuildBanner,
+  debugCheckStateDiff,
+  debugIsModifiedTrue,
+  debugReset,
+  graphEqual,
+  isLoading,
+  setLoading,
+  shouldDispatchGraphChanged,
+  shouldUpdateDirty
+} from '@/platform/changeTracking'
+import {
+  ComfyWorkflow,
+  useWorkflowStore
+} from '@/platform/workflow/management/stores/workflowStore'
 import type { ComfyWorkflowJSON } from '@/platform/workflow/validation/schemas/workflowSchema'
 import type { ExecutedWsMessage } from '@/schemas/apiSchema'
 import { useExecutionStore } from '@/stores/executionStore'
@@ -21,7 +34,6 @@ function clone<T>(obj: T): T {
 }
 
 const logger = log.getLogger('ChangeTracker')
-// Change to debug for more verbose logging
 logger.setLevel('info')
 
 function isActiveTracker(tracker: ChangeTracker): boolean {
@@ -30,14 +42,10 @@ function isActiveTracker(tracker: ChangeTracker): boolean {
 
 export class ChangeTracker {
   static MAX_HISTORY = 50
-  /**
-   * Guard flag to prevent captureCanvasState from running during loadGraphData.
-   * Between rootGraph.configure() and afterLoadNewGraph(), the rootGraph
-   * contains the NEW workflow's data while activeWorkflow still points to
-   * the OLD workflow. Any captureCanvasState call in that window would
-   * serialize the wrong graph into the old workflow's activeState, corrupting it.
-   */
-  static isLoadingGraph = false
+
+  /** Re-export graphEqual from canonicalize module for backward compatibility. */
+  static graphEqual = graphEqual
+
   /**
    * The active state of the workflow.
    */
@@ -74,10 +82,13 @@ export class ChangeTracker {
    * Save the current state as the initial state.
    */
   reset(state?: ComfyWorkflowJSON) {
-    // Do not reset the state if we are restoring.
     if (this._restoringState) return
 
-    logger.debug('Reset State')
+    debugReset(
+      this.workflow.path,
+      state?.nodes?.length,
+      new Error().stack?.split('\n')[2]?.trim()
+    )
     if (state) this.activeState = clone(state)
     this.initialState = clone(this.activeState)
   }
@@ -154,17 +165,24 @@ export class ChangeTracker {
     }
   }
 
-  updateModified() {
-    api.dispatchCustomEvent('graphChanged', this.activeState)
+  updateModified(origin: ChangeOrigin = 'user') {
+    if (shouldDispatchGraphChanged(origin)) {
+      api.dispatchCustomEvent('graphChanged', this.activeState)
+    }
 
-    // Get the workflow from the store as ChangeTracker is raw object, i.e.
-    // `this.workflow` is not reactive.
+    if (!shouldUpdateDirty(origin)) return
+
     const workflow = useWorkflowStore().getWorkflowByPath(this.workflow.path)
     if (workflow) {
-      workflow.isModified = !ChangeTracker.graphEqual(
-        this.initialState,
-        this.activeState
-      )
+      const wasModified = workflow.isModified
+      workflow.isModified = !graphEqual(this.initialState, this.activeState)
+      if (workflow.isModified && !wasModified) {
+        const diff = ChangeTracker.graphDiff(
+          this.initialState,
+          this.activeState
+        )
+        debugIsModifiedTrue(workflow.path, JSON.stringify(diff).slice(0, 300))
+      }
       if (logger.getLevel() <= logger.levels.DEBUG && workflow.isModified) {
         const diff = ChangeTracker.graphDiff(
           this.initialState,
@@ -175,18 +193,8 @@ export class ChangeTracker {
     }
   }
 
-  /**
-   * Snapshot the current canvas state into activeState and push undo.
-   * INVARIANT: only the active workflow's tracker may read from the canvas.
-   * Calling this on an inactive tracker would capture the wrong graph.
-   */
   captureCanvasState() {
-    if (
-      !app.graph ||
-      this.changeCount ||
-      this._restoringState ||
-      ChangeTracker.isLoadingGraph
-    )
+    if (!app.graph || this.changeCount || this._restoringState || isLoading())
       return
 
     if (!isActiveTracker(this)) {
@@ -197,17 +205,41 @@ export class ChangeTracker {
       return
     }
 
+    if (app.canvas?.state?.ghostNodeId != null) return
     const currentState = clone(app.rootGraph.serialize()) as ComfyWorkflowJSON
     if (!this.activeState) {
       this.activeState = currentState
       return
     }
-    if (!ChangeTracker.graphEqual(this.activeState, currentState)) {
+    if (!graphEqual(this.activeState, currentState)) {
       this.undoQueue.push(this.activeState)
       if (this.undoQueue.length > ChangeTracker.MAX_HISTORY) {
         this.undoQueue.shift()
       }
       logger.debug('Diff detected. Undo queue length:', this.undoQueue.length)
+      const diffKeys = Object.keys(
+        ChangeTracker.graphDiff(this.activeState, currentState) ?? {}
+      )
+      const movedNode = currentState.nodes?.find((n, i) => {
+        const prev = this.activeState?.nodes?.[i]
+        return (
+          prev &&
+          (Math.abs((n.pos?.[0] ?? 0) - (prev.pos?.[0] ?? 0)) > 0.5 ||
+            Math.abs((n.pos?.[1] ?? 0) - (prev.pos?.[1] ?? 0)) > 0.5)
+        )
+      })
+      const prevMovedNode = movedNode
+        ? this.activeState?.nodes?.[currentState.nodes?.indexOf(movedNode)!]
+        : null
+      debugCheckStateDiff(
+        this.workflow.path,
+        diffKeys,
+        this.undoQueue.length,
+        movedNode
+          ? `| node id=${movedNode.id} pos: [${prevMovedNode?.pos?.map((v: number) => v.toFixed(2))}] → [${movedNode.pos?.map((v: number) => v.toFixed(2))}]`
+          : '',
+        new Error().stack?.split('\n')[2]?.trim()
+      )
 
       this.activeState = currentState
       this.redoQueue.length = 0
@@ -217,16 +249,20 @@ export class ChangeTracker {
 
   /** @deprecated Use {@link captureCanvasState} instead. */
   checkState() {
-    if (!ChangeTracker._checkStateWarned) {
-      ChangeTracker._checkStateWarned = true
-      logger.warn(
-        'checkState() is deprecated — use captureCanvasState() instead.'
-      )
-    }
     this.captureCanvasState()
   }
 
-  private static _checkStateWarned = false
+  /**
+   * Backward-compat getter/setter backed by the epoch-based isLoading() system.
+   * New code should import isLoading() from @/platform/changeTracking directly.
+   * @deprecated Use isLoading() from @/platform/changeTracking instead.
+   */
+  static get isLoadingGraph(): boolean {
+    return isLoading()
+  }
+  static set isLoadingGraph(value: boolean) {
+    setLoading(value)
+  }
 
   async updateState(source: ComfyWorkflowJSON[], target: ComfyWorkflowJSON[]) {
     const prevState = source.pop()
@@ -239,7 +275,7 @@ export class ChangeTracker {
           silentAssetErrors: true
         })
         this.activeState = prevState
-        this.updateModified()
+        this.updateModified('undo')
       } finally {
         this._restoringState = false
       }
@@ -291,6 +327,7 @@ export class ChangeTracker {
   }
 
   static init() {
+    debugBuildBanner()
     const getCurrentChangeTracker = () =>
       useWorkflowStore().activeWorkflow?.changeTracker
     const captureState = () => getCurrentChangeTracker()?.captureCanvasState()
@@ -458,47 +495,6 @@ export class ChangeTracker {
         return true
       }
     }
-    return false
-  }
-
-  static graphEqual(a: ComfyWorkflowJSON, b: ComfyWorkflowJSON) {
-    if (a === b) return true
-
-    if (typeof a == 'object' && a && typeof b == 'object' && b) {
-      // Compare nodes ignoring order
-      if (
-        !_.isEqualWith(a.nodes, b.nodes, (arrA, arrB) => {
-          if (Array.isArray(arrA) && Array.isArray(arrB)) {
-            return _.isEqual(new Set(arrA), new Set(arrB))
-          }
-        })
-      ) {
-        return false
-      }
-
-      // Compare extra properties ignoring ds
-      if (
-        !_.isEqual(_.omit(a.extra ?? {}, ['ds']), _.omit(b.extra ?? {}, ['ds']))
-      )
-        return false
-
-      // Compare other properties normally
-      for (const key of [
-        'links',
-        'floatingLinks',
-        'reroutes',
-        'groups',
-        'definitions',
-        'subgraphs'
-      ]) {
-        if (!_.isEqual(a[key], b[key])) {
-          return false
-        }
-      }
-
-      return true
-    }
-
     return false
   }
 
