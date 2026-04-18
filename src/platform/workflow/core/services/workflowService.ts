@@ -259,8 +259,12 @@ export const useWorkflowService = () => {
       !options.force
     )
       return
-    // If this exact workflow is already loading: no-op (idempotent)
-    if (currentlyLoadingWorkflow === workflow) return
+    // If this exact workflow is already loading: user re-confirmed this tab.
+    // Cancel any queued switch away from it and let the in-flight load settle.
+    if (currentlyLoadingWorkflow === workflow) {
+      pendingWorkflowLoad = null
+      return
+    }
     // If a different load is in progress: queue this one (last click wins) and bail.
     // openWorkflow() will process the pending after the in-flight load completes.
     if (currentlyLoadingWorkflow) {
