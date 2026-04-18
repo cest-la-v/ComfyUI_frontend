@@ -9,6 +9,17 @@ import { onUnmounted, ref } from 'vue'
 import type { useCanvasStore } from '@/renderer/core/canvas/canvasStore'
 import { layoutStore } from '@/renderer/core/layout/store/layoutStore'
 import { LayoutSource } from '@/renderer/core/layout/types'
+import type { ComfyWorkflowJSON } from '@/platform/workflow/validation/schemas/workflowSchema'
+import { useWorkflowStore } from '@/platform/workflow/management/stores/workflowStore'
+import {
+  currentEpoch,
+  debugFlushPending,
+  graphEqual,
+  isStale,
+  isOwner
+} from '@/platform/changeTracking'
+import { app } from '@/scripts/app'
+import { clone } from '@/scripts/utils'
 
 /**
  * Composable for syncing LiteGraph with the Layout system
@@ -21,52 +32,104 @@ export function useLayoutSync() {
   let isMicrotaskQueued = false
   let syncGeneration = 0
 
+  let capturedEpoch = currentEpoch()
+
   function flushPendingChanges(
     canvas: ReturnType<typeof useCanvasStore>['canvas']
   ) {
     rafId = null
     isMicrotaskQueued = false
+    // Cancel if a new graph load started since this flush was scheduled
+    if (isStale(capturedEpoch)) return
     if (!canvas?.graph || pendingNodeIds.size === 0) return
 
-    for (const nodeId of pendingNodeIds) {
-      const layout = layoutStore.getNodeLayoutRef(nodeId).value
-      if (!layout) continue
+    const workflow = useWorkflowStore().activeWorkflow
+    const tracker = workflow?.changeTracker
 
-      const liteNode = canvas.graph.getNodeById(nodeId)
-      if (!liteNode) continue
+    // Suppress checkState() for the duration of the flush.
+    // onResize() can trigger graphChanged → checkState() synchronously mid-loop,
+    // which would push bogus undo entries, clear redo, and set isModified = true
+    // before our re-baseline guard runs. Incrementing changeCount gates checkState out.
+    if (tracker) tracker.changeCount++
 
-      if (
-        liteNode.pos[0] !== layout.position.x ||
-        liteNode.pos[1] !== layout.position.y
-      ) {
-        liteNode.pos[0] = layout.position.x
-        liteNode.pos[1] = layout.position.y
+    try {
+      for (const nodeId of pendingNodeIds) {
+        const layout = layoutStore.getNodeLayoutRef(nodeId).value
+        if (!layout) continue
+
+        const liteNode = canvas.graph.getNodeById(nodeId)
+        if (!liteNode) continue
+
+        if (
+          liteNode.pos[0] !== layout.position.x ||
+          liteNode.pos[1] !== layout.position.y
+        ) {
+          debugFlushPending(nodeId, liteNode, layout)
+          liteNode.pos[0] = layout.position.x
+          liteNode.pos[1] = layout.position.y
+        }
+
+        // Note: layout.size.height is the content height without title.
+        // LiteGraph's measure() will add titleHeight to get boundingRect.
+        // Do NOT use addNodeTitleHeight here - that would double-count the title.
+        if (
+          liteNode.size[0] !== layout.size.width ||
+          liteNode.size[1] !== layout.size.height
+        ) {
+          // Update internal size directly (like position above) to avoid
+          // the size setter writing back to layoutStore with Canvas source,
+          // which would create a feedback loop through handleLayoutChange.
+          liteNode.size[0] = layout.size.width
+          liteNode.size[1] = layout.size.height
+          liteNode.onResize?.(liteNode.size)
+        }
       }
-
-      // Note: layout.size.height is the content height without title.
-      // LiteGraph's measure() will add titleHeight to get boundingRect.
-      // Do NOT use addNodeTitleHeight here - that would double-count the title.
-      if (
-        liteNode.size[0] !== layout.size.width ||
-        liteNode.size[1] !== layout.size.height
-      ) {
-        // Update internal size directly (like position above) to avoid
-        // the size setter writing back to layoutStore with Canvas source,
-        // which would create a feedback loop through handleLayoutChange.
-        liteNode.size[0] = layout.size.width
-        liteNode.size[1] = layout.size.height
-        liteNode.onResize?.(liteNode.size)
-      }
+    } finally {
+      if (tracker) tracker.changeCount--
     }
 
     pendingNodeIds.clear()
     canvas.setDirty(true, true)
+
+    // Re-baseline initialState to absorb DOM-corrected node sizes/positions.
+    // Without this, the first checkState() after DOM layout sync would detect
+    // the pre-DOM vs post-DOM difference as a user modification → false white dot.
+    if (
+      tracker &&
+      // Guard: skip re-baseline if the graph is mid-load (owner is null
+      // between loadGraphData() resetting it and afterLoadNewGraph() setting it to the
+      // new workflow path). Without this, flushPendingChanges fires after configure()
+      // but before afterLoadNewGraph(), serializing new-file data into the OLD
+      // workflow's tracker → cross-tab content contamination.
+      isOwner(workflow.path) &&
+      // Guard: skip re-baseline while the user is actively dragging a node. DOM layout
+      // updates fire during drag, but checkState() only runs on mouseup. Without this
+      // guard, the mid-drag position gets absorbed into initialState before checkState()
+      // can detect it as a change → dirty dot never appears after node moves.
+      !canvas.isDragging &&
+      !layoutStore.isDraggingVueNodes.value
+    ) {
+      // Serialize from app.rootGraph to match checkState()'s serialization source.
+      // Using canvas.graph would diverge when a subgraph is active.
+      const currentState = clone(
+        app.rootGraph.serialize() as unknown as ComfyWorkflowJSON
+      )
+      if (graphEqual(tracker.initialState, currentState)) {
+        tracker.reset(currentState)
+        // reset() doesn't call updateModified(), so isModified can be stale.
+        // Explicitly clear it since we just confirmed the graph is at clean baseline.
+        workflow.isModified = false
+      }
+    }
   }
 
   function scheduleFlush(
     source: LayoutSource,
     canvas: ReturnType<typeof useCanvasStore>['canvas']
   ) {
+    // Capture epoch at schedule time so deferred flushes can detect stale contexts
+    capturedEpoch = currentEpoch()
+
     const shouldFlushInMicrotask =
       source === LayoutSource.Vue || source === LayoutSource.DOM
 
