@@ -2,6 +2,7 @@ import { markRaw } from 'vue'
 
 import { t } from '@/i18n'
 import type { ChangeTracker } from '@/scripts/changeTracker'
+import { graphEqual, debugDraftComparison } from '@/platform/changeTracking'
 import type { AppMode } from '@/composables/useAppMode'
 import type { NodeId } from '@/lib/litegraph/src/LGraphNode'
 import { UserFile } from '@/stores/userFileStore'
@@ -142,7 +143,17 @@ export class ComfyWorkflow extends UserFile {
     if (draftState && draftContent) {
       this.changeTracker.activeState = draftState
       this.content = draftContent
-      this._isModified = true
+      // Only mark modified if the draft actually differs from the saved file.
+      // A stale clean draft (saved on every tab switch) should not trigger a
+      // false dirty dot after page reload.
+      this._isModified = !graphEqual(initialState, draftState)
+      debugDraftComparison(
+        this.path,
+        this._isModified,
+        this._isModified
+          ? JSON.stringify(draftState).slice(0, 200)
+          : '(graphs equal)'
+      )
       draftStore.markDraftUsed(this.path)
     }
     return this as this & LoadedComfyWorkflow
