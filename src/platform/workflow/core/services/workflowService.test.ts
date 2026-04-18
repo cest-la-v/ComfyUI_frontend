@@ -404,6 +404,122 @@ describe('useWorkflowService', () => {
     })
   })
 
+  describe('openWorkflow tab-switch mutex', () => {
+    let workflowStore: ReturnType<typeof useWorkflowStore>
+
+    function createLoadableWorkflow(path: string): ComfyWorkflow {
+      return {
+        path,
+        isLoaded: true,
+        activeState: { nodes: [], links: [] },
+        changeTracker: { reset: vi.fn(), restore: vi.fn(), undoQueue: [] },
+        pendingWarnings: null
+      } as unknown as ComfyWorkflow
+    }
+
+    beforeEach(() => {
+      workflowStore = useWorkflowStore()
+    })
+
+    it('queues a pending switch when a different load is in-flight', async () => {
+      const wf1 = createLoadableWorkflow('workflows/one.json')
+      const wf2 = createLoadableWorkflow('workflows/two.json')
+      const service = useWorkflowService()
+
+      let resolveWf1!: () => void
+      vi.mocked(app.loadGraphData)
+        .mockImplementationOnce(
+          () =>
+            new Promise<void>((res) => {
+              resolveWf1 = () => {
+                workflowStore.activeWorkflow = wf1 as LoadedComfyWorkflow
+                res()
+              }
+            })
+        )
+        .mockImplementation(async (_data, _clean, _restore, wf) => {
+          workflowStore.activeWorkflow = wf as LoadedComfyWorkflow
+        })
+
+      const wf1Promise = service.openWorkflow(wf1)
+      await Promise.resolve() // let wf1 start
+
+      void service.openWorkflow(wf2) // queue wf2 as pending
+
+      resolveWf1()
+      await wf1Promise
+
+      // wf2 should have been loaded as the pending switch
+      expect(app.loadGraphData).toHaveBeenCalledTimes(2)
+      expect(workflowStore.activeWorkflow?.path).toBe('workflows/two.json')
+    })
+
+    it('re-clicking the loading tab cancels any queued switch', async () => {
+      const wf1 = createLoadableWorkflow('workflows/one.json')
+      const wf2 = createLoadableWorkflow('workflows/two.json')
+      const service = useWorkflowService()
+
+      let resolveWf1!: () => void
+      vi.mocked(app.loadGraphData).mockImplementationOnce(
+        () =>
+          new Promise<void>((res) => {
+            resolveWf1 = () => {
+              workflowStore.activeWorkflow = wf1 as LoadedComfyWorkflow
+              res()
+            }
+          })
+      )
+
+      const wf1Promise = service.openWorkflow(wf1)
+      await Promise.resolve() // let wf1 start
+
+      void service.openWorkflow(wf2) // queue wf2
+      void service.openWorkflow(wf1) // re-click wf1: should cancel wf2
+
+      resolveWf1()
+      await wf1Promise
+
+      // wf2 must NOT have been loaded — pending was cleared by the re-click
+      expect(app.loadGraphData).toHaveBeenCalledTimes(1)
+      expect(workflowStore.activeWorkflow?.path).toBe('workflows/one.json')
+    })
+
+    it('last-click wins when rapidly cycling between tabs', async () => {
+      const wf1 = createLoadableWorkflow('workflows/one.json')
+      const wf2 = createLoadableWorkflow('workflows/two.json')
+      const service = useWorkflowService()
+
+      let resolveWf1!: () => void
+      vi.mocked(app.loadGraphData)
+        .mockImplementationOnce(
+          () =>
+            new Promise<void>((res) => {
+              resolveWf1 = () => {
+                workflowStore.activeWorkflow = wf1 as LoadedComfyWorkflow
+                res()
+              }
+            })
+        )
+        .mockImplementation(async (_data, _clean, _restore, wf) => {
+          workflowStore.activeWorkflow = wf as LoadedComfyWorkflow
+        })
+
+      const wf1Promise = service.openWorkflow(wf1)
+      await Promise.resolve()
+
+      // Rapid clicks: wf2 → wf1 (cancels wf2) → wf2 (re-queues wf2, last click)
+      void service.openWorkflow(wf2)
+      void service.openWorkflow(wf1) // cancels wf2
+      void service.openWorkflow(wf2) // re-queues wf2
+
+      resolveWf1()
+      await wf1Promise
+
+      expect(app.loadGraphData).toHaveBeenCalledTimes(2)
+      expect(workflowStore.activeWorkflow?.path).toBe('workflows/two.json')
+    })
+  })
+
   describe('saveWorkflow', () => {
     let workflowStore: ReturnType<typeof useWorkflowStore>
 
