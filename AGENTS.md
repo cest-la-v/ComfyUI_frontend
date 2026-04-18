@@ -17,6 +17,13 @@ See @docs/guidance/\*.md for file-type-specific conventions (auto-loaded by glob
     - `utils/`
     - `assets/`
     - `locales/`
+    - `renderer/core/` — low-level rendering systems
+      - `canvas/` — LiteGraph canvas store and helpers
+      - `layout/` — Layout store, sync composables, and layout types
+      - `spatial/` — Spatial indexing / hit-testing
+      - `thumbnail/` — Node thumbnail generation
+    - `platform/` — Cross-cutting platform concerns
+      - `auth/`, `cloud/`, `settings/`, `workflow/`, `keybindings/`, `updates/`, etc.
 - Routing: `src/router.ts`,
 - i18n: `src/i18n.ts`,
 - Entry Point: `src/main.ts`.
@@ -50,16 +57,18 @@ This project uses **pnpm**. Always prefer scripts defined in `package.json` (e.g
 - `pnpm preview`: Preview the production build locally
 - `pnpm test:unit`: Run Vitest unit tests
 - `pnpm test:browser:local`: Run Playwright E2E tests (`browser_tests/`)
-- `pnpm lint` / `pnpm lint:fix`: Lint (ESLint)
-- `pnpm format` / `pnpm format:check`: oxfmt
+- `pnpm lint` / `pnpm lint:fix`: Lint (oxlint + ESLint + stylelint)
+- `pnpm format` / `pnpm format:check`: Format with oxfmt
 - `pnpm typecheck`: Vue TSC type checking
+- `pnpm knip`: Dead-code / unused-export analysis (required before merging)
 - `pnpm storybook`: Start Storybook development server
+- `pnpm clean`: Reset Nx cache
 
 ## Development Workflow
 
 1. Make code changes
 2. Run relevant tests
-3. Run `pnpm typecheck`, `pnpm lint`, `pnpm format`
+3. Run `pnpm typecheck`, `pnpm lint`, `pnpm format`, `pnpm knip`
 4. Check if README updates are needed
 5. Suggest docs.comfy.org updates for user-facing changes
 
@@ -205,7 +214,7 @@ See @docs/testing/\*.md for detailed patterns.
 2. Do not write tests that are dependent on non-behavioral features like utility classes or styles
 3. Be parsimonious in testing, do not write redundant tests  
    See <https://tidyfirst.substack.com/p/composable-tests>
-4. [Don’t Mock What You Don’t Own](https://hynek.me/articles/what-to-mock-in-5-mins/)
+4. [Don't Mock What You Don't Own](https://hynek.me/articles/what-to-mock-in-5-mins/)
 
 ### Vitest / Unit Tests
 
@@ -272,8 +281,8 @@ In doing a code review, you should make sure that:
 - The functionality is good for the users of the code.
 - Any UI changes are sensible and look good.
 - Any parallel programming is done safely.
-- The code isn’t more complex than it needs to be.
-- The developer isn’t implementing things they might need in the future but don’t know they need now.
+- The code isn't more complex than it needs to be.
+- The developer isn't implementing things they might need in the future but don't know they need now.
 - Code has appropriate unit tests.
 - Tests are well-designed.
 - The developer used clear names for everything.
@@ -283,9 +292,9 @@ In doing a code review, you should make sure that:
 
 #### [Complexity](https://google.github.io/eng-practices/review/reviewer/looking-for.html#complexity)
 
-Is the CL more complex than it should be? Check this at every level of the CL—are individual lines too complex? Are functions too complex? Are classes too complex? “Too complex” usually means “can’t be understood quickly by code readers.” It can also mean “developers are likely to introduce bugs when they try to call or modify this code.”
+Is the CL more complex than it should be? Check this at every level of the CL—are individual lines too complex? Are functions too complex? Are classes too complex? "Too complex" usually means "can't be understood quickly by code readers." It can also mean "developers are likely to introduce bugs when they try to call or modify this code."
 
-A particular type of complexity is over-engineering, where developers have made the code more generic than it needs to be, or added functionality that isn’t presently needed by the system. Reviewers should be especially vigilant about over-engineering. Encourage developers to solve the problem they know needs to be solved now, not the problem that the developer speculates might need to be solved in the future. The future problem should be solved once it arrives and you can see its actual shape and requirements in the physical universe.
+A particular type of complexity is over-engineering, where developers have made the code more generic than it needs to be, or added functionality that isn't presently needed by the system. Reviewers should be especially vigilant about over-engineering. Encourage developers to solve the problem they know needs to be solved now, not the problem that the developer speculates might need to be solved in the future. The future problem should be solved once it arrives and you can see its actual shape and requirements in the physical universe.
 
 ## Repository Navigation
 
@@ -340,3 +349,16 @@ When using `take_snapshot` to inspect dropdowns, listboxes, or other components 
 - Put scripts used under `/temp/scripts/`
 - Put summaries of work performed under `/temp/summaries/`
 - Put TODOs and status updates under `/temp/in_progress/`
+
+## Testing Locally (against a live ComfyUI server)
+
+```bash
+# Build and point ComfyUI at the local build:
+pnpm build
+cd ../ComfyUI && python main.py --front-end-root ../ComfyUI_frontend/dist
+
+# Or install as editable package (persists across server restarts):
+pip install -e comfyui_frontend_package/
+```
+
+`--front-end-root` takes precedence over the pip package. Always pass it explicitly when testing local builds.
