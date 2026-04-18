@@ -1028,3 +1028,35 @@ describe('Zero UUID handling in configure', () => {
     expect(subgraph.id).toBe(zeroUuid)
   })
 })
+
+describe('LGraphNode.serialize', () => {
+  it('excludes flags.ghost from serialized output', () => {
+    const node = new LGraphNode('TestNode')
+    node.flags.ghost = true
+
+    const serialized = node.serialize()
+
+    expect(serialized.flags).not.toHaveProperty('ghost')
+  })
+
+  it('preserves other flags in serialized output', () => {
+    const node = new LGraphNode('TestNode')
+    node.flags.ghost = true
+    node.flags.collapsed = true
+
+    const serialized = node.serialize()
+
+    expect(serialized.flags.collapsed).toBe(true)
+    expect(serialized.flags).not.toHaveProperty('ghost')
+  })
+
+  it('serializes cleanly when ghost flag is absent', () => {
+    const node = new LGraphNode('TestNode')
+    node.flags.collapsed = true
+
+    const serialized = node.serialize()
+
+    expect(serialized.flags.collapsed).toBe(true)
+    expect(serialized.flags).not.toHaveProperty('ghost')
+  })
+})

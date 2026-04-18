@@ -947,7 +947,13 @@ export class LGraphNode
       type: this.type,
       pos: [this.pos[0], this.pos[1]],
       size: [this.size[0], this.size[1]],
-      flags: LiteGraph.cloneObject(this.flags),
+      flags: (() => {
+        const f = LiteGraph.cloneObject(this.flags)
+        // ghost is a transient rendering state (node-follows-cursor placement);
+        // it must never be persisted to undo history or workflow files.
+        delete f.ghost
+        return f
+      })(),
       order: this.order,
       mode: this.mode,
       showAdvanced: this.showAdvanced
