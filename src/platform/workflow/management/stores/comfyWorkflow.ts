@@ -2,6 +2,9 @@ import { markRaw } from 'vue'
 
 import { t } from '@/i18n'
 import type { ChangeTracker } from '@/scripts/changeTracker'
+import { graphEqual, debugDraftComparison } from '@/platform/changeTracking'
+import type { AppMode } from '@/composables/useAppMode'
+import type { NodeId } from '@/lib/litegraph/src/LGraphNode'
 import { UserFile } from '@/stores/userFileStore'
 import type { ComfyWorkflowJSON } from '@/platform/workflow/validation/schemas/workflowSchema'
 import type { MissingModelCandidate } from '@/platform/missingModel/types'
@@ -150,9 +153,14 @@ export class ComfyWorkflow extends UserFile {
     if (draftState && draftContent) {
       this.changeTracker.activeState = draftState
       this.content = draftContent
-      this._isModified = true
-      // Saved-workflow draft overlay path; direct persisted-draft restores
-      // are touched in workflowDraftStoreV2.loadDraft().
+      this._isModified = !graphEqual(initialState, draftState)
+      debugDraftComparison(
+        this.path,
+        this._isModified,
+        this._isModified
+          ? JSON.stringify(draftState).slice(0, 200)
+          : '(graphs equal)'
+      )
       draftStore.markDraftUsed(this.path)
     }
     return this as this & LoadedComfyWorkflow

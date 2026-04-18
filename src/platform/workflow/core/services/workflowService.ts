@@ -7,10 +7,13 @@ import type { Point, SerialisableGraph } from '@/lib/litegraph/src/litegraph'
 import { useSettingStore } from '@/platform/settings/settingStore'
 import { useToastStore } from '@/platform/updates/common/toastStore'
 import {
-  normalizePendingWarnings,
-  updatePendingWarnings
-} from '@/platform/workflow/core/utils/pendingWarnings'
-import { useWorkflowDraftStoreV2 } from '@/platform/workflow/persistence/stores/workflowDraftStoreV2'
+  commitOwnership,
+  debugAfterLoad,
+  debugBeforeLoad,
+  debugOpenWorkflow,
+  graphEqual
+} from '@/platform/changeTracking'
+import { useWorkflowDraftStore } from '@/platform/workflow/persistence/stores/workflowDraftStore'
 import {
   ComfyWorkflow,
   useWorkflowStore
@@ -42,6 +45,11 @@ function linearModeToAppMode(linearMode: unknown): AppMode | null {
   if (typeof linearMode !== 'boolean') return null
   return linearMode ? 'app' : 'graph'
 }
+
+// Module-level state shared across all useWorkflowService() calls to track
+// concurrent tab loads and queue rapid tab switches correctly.
+let currentlyLoadingWorkflow: ComfyWorkflow | null = null
+let pendingWorkflowLoad: ComfyWorkflow | null = null
 
 export const useWorkflowService = () => {
   const settingStore = useSettingStore()
@@ -278,27 +286,54 @@ export const useWorkflowService = () => {
     workflow: ComfyWorkflow,
     options: { force: boolean } = { force: false }
   ) => {
-    if (workflowStore.isActive(workflow) && !options.force) return
-
-    const loadFromRemote = !workflow.isLoaded
-    if (loadFromRemote) {
-      await workflow.load()
+    // If nothing is loading and this is already active: no-op
+    if (
+      !currentlyLoadingWorkflow &&
+      workflowStore.isActive(workflow) &&
+      !options.force
+    )
+      return
+    // If this exact workflow is already loading: no-op (idempotent)
+    if (currentlyLoadingWorkflow === workflow) return
+    // If a different load is in progress: queue this one (last click wins) and bail.
+    // openWorkflow() will process the pending after the in-flight load completes.
+    if (currentlyLoadingWorkflow) {
+      pendingWorkflowLoad = workflow
+      return
     }
 
-    await app.loadGraphData(
-      toRaw(workflow.activeState) as ComfyWorkflowJSON,
-      /* clean=*/ true,
-      /* restore_view=*/ true,
-      workflow,
-      {
-        checkForRerouteMigration: false,
-        deferWarnings: true,
-        skipAssetScans: !loadFromRemote && !options.force
+    currentlyLoadingWorkflow = workflow
+    try {
+      const loadFromRemote = !workflow.isLoaded
+      if (loadFromRemote) {
+        await workflow.load()
       }
-    )
-    showPendingWarnings(undefined, {
-      silent: !loadFromRemote && !options.force
-    })
+
+      debugOpenWorkflow(workflow.path)
+      await app.loadGraphData(
+        toRaw(workflow.activeState) as ComfyWorkflowJSON,
+        /* clean=*/ true,
+        /* restore_view=*/ true,
+        workflow,
+        {
+          checkForRerouteMigration: false,
+          deferWarnings: true,
+          skipAssetScans: !loadFromRemote && !options.force
+        }
+      )
+      showPendingWarnings(undefined, {
+        silent: !loadFromRemote && !options.force
+      })
+    } finally {
+      currentlyLoadingWorkflow = null
+    }
+
+    // Process any tab switch that arrived during the load (last click wins)
+    if (pendingWorkflowLoad) {
+      const next = pendingWorkflowLoad
+      pendingWorkflowLoad = null
+      await openWorkflow(next)
+    }
   }
 
   /**
@@ -409,8 +444,36 @@ export const useWorkflowService = () => {
     const workflowStore = useWorkspaceStore().workflow
     const activeWorkflow = workflowStore.activeWorkflow
     if (activeWorkflow) {
-      activeWorkflow.changeTracker?.deactivate()
-      persistActiveWorkflowDraft(activeWorkflow)
+      debugBeforeLoad(activeWorkflow.path)
+      activeWorkflow.changeTracker.store()
+      if (
+        settingStore.get('Comfy.Workflow.Persist') &&
+        activeWorkflow.path &&
+        !activeWorkflow.changeTracker._restoringState &&
+        !graphEqual(
+          activeWorkflow.changeTracker.initialState,
+          activeWorkflow.changeTracker.activeState
+        )
+      ) {
+        const activeState = activeWorkflow.activeState
+        if (activeState) {
+          try {
+            const workflowJson = JSON.stringify(activeState)
+            workflowDraftStore.saveDraft(activeWorkflow.path, {
+              data: workflowJson,
+              updatedAt: Date.now(),
+              name: activeWorkflow.key,
+              isTemporary: activeWorkflow.isTemporary
+            })
+          } catch {
+            toastStore.add({
+              severity: 'error',
+              summary: t('g.error'),
+              detail: t('toastMessages.failedToSaveDraft')
+            })
+          }
+        }
+      }
       // Cache missing model/media/node state for restore on tab switch.
       // Always overwrite to reflect the current store state (e.g. after
       // muting a node cleared its errors).
@@ -500,11 +563,14 @@ export const useWorkflowService = () => {
               ) ?? freshLoadMode
             trackIfEnteringApp(loadedWorkflow)
           }
-          if (shareId) {
-            loadedWorkflow.shareId = shareId
-          }
-          loadedWorkflow.changeTracker.reset(workflowData)
+          commitOwnership(loadedWorkflow, app.rootGraph)
           loadedWorkflow.changeTracker.restore()
+          debugAfterLoad(
+            loadedWorkflow.path,
+            'A',
+            loadedWorkflow.changeTracker.undoQueue.length,
+            app.rootGraph._nodes?.length
+          )
           return
         }
       }
@@ -519,6 +585,8 @@ export const useWorkflowService = () => {
       }
       trackIfEnteringApp(tempWorkflow)
       await workflowStore.openWorkflow(tempWorkflow)
+      commitOwnership(tempWorkflow, app.rootGraph)
+      debugAfterLoad(tempWorkflow.path, 'B', 0, app.rootGraph._nodes?.length)
       return
     }
 
@@ -530,8 +598,14 @@ export const useWorkflowService = () => {
       loadedWorkflow.initialMode = freshLoadMode
       trackIfEnteringApp(loadedWorkflow)
     }
-    loadedWorkflow.changeTracker.reset(workflowData)
+    commitOwnership(loadedWorkflow, app.rootGraph)
     loadedWorkflow.changeTracker.restore()
+    debugAfterLoad(
+      loadedWorkflow.path,
+      'C',
+      loadedWorkflow.changeTracker?.undoQueue.length ?? 0,
+      app.rootGraph._nodes?.length
+    )
   }
 
   /**

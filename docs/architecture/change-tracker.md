@@ -115,3 +115,60 @@ The `litegraph:canvas` custom event also supports this with `before-change` /
 - `captureCanvasState()` is a no-op when `changeCount > 0` (inside a transaction)
 - `undoQueue` is capped at 50 entries (`MAX_HISTORY`)
 - `graphEqual` ignores node order and `ds` (pan/zoom) when comparing
+
+## Known Footguns
+
+### `reset()` does not update `isModified`
+
+`reset(state?)` sets `initialState = clone(activeState)` (making them equal)
+but **never** calls `updateModified()`. This means `workflow.isModified` can
+remain `true` even after `reset()` makes `initialState === activeState`.
+
+This happens in practice when `comfyWorkflow.load()` restores a draft:
+
+```ts
+// comfyWorkflow.ts - load()
+this._isModified = true // draft loaded, mark modified
+// ...
+changeTracker.reset(savedState) // initialState = activeState, but isModified stays true!
+```
+
+**Consequence:** Any code guarding on `!workflow.isModified` to decide whether
+to absorb DOM-corrections will incorrectly skip the re-baseline, letting the
+DOM-corrected sizes diverge from `initialState` and producing a false dirty dot.
+
+**Rule:** When you need to test "is the tracker at its clean baseline?", use
+`ChangeTracker.graphEqual(tracker.initialState, tracker.activeState)` instead
+of `workflow.isModified`.
+
+### `_restoringState` and draft save corruption during undo/redo
+
+`updateState()` (undo/redo) sets `_restoringState = true`, then calls
+`loadGraphData(prevState)`. Inside `loadGraphData`, `beforeLoadNewGraph()` runs
+and saves a draft. At that point `activeState` is still the **pre-undo** state
+— the assignment `this.activeState = prevState` happens only after
+`loadGraphData` returns. Saving the draft with the wrong `activeState` causes
+the "undone" change to reappear on next page reload.
+
+Guard the draft-save block in `beforeLoadNewGraph()`:
+
+```ts
+if (
+  settingStore.get('Comfy.Workflow.Persist') &&
+  activeWorkflow.path &&
+  !activeWorkflow.changeTracker._restoringState
+) {
+  // save draft
+}
+```
+
+### Baseline must capture post-`computeSize` state
+
+`loadGraphData` calls `computeSize()` on every node **after** `configure()`,
+mutating sizes in-place. Any baseline (`reset()`) set from the raw
+`workflowData` snapshot (pre-`computeSize`) will diverge from the graph the
+moment `checkState()` serializes the mutated nodes.
+
+Always call `reset(app.rootGraph.serialize())` — not `reset(workflowData)` —
+inside `afterLoadNewGraph()`, where `app.rootGraph` already reflects all
+post-`computeSize` mutations.

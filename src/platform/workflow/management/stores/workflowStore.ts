@@ -9,8 +9,12 @@ import type {
   LGraphNode,
   Subgraph
 } from '@/lib/litegraph/src/litegraph'
-import type { ComfyWorkflowJSON } from '@/platform/workflow/validation/schemas/workflowSchema'
-import { useWorkflowDraftStoreV2 } from '@/platform/workflow/persistence/stores/workflowDraftStoreV2'
+import type {
+  ComfyWorkflowJSON,
+  NodeId
+} from '@/platform/workflow/validation/schemas/workflowSchema'
+import { useWorkflowDraftStore } from '@/platform/workflow/persistence/stores/workflowDraftStore'
+import { debugActivateWorkflow } from '@/platform/changeTracking'
 // eslint-disable-next-line import-x/no-restricted-paths
 import { useWorkflowThumbnail } from '@/renderer/core/thumbnail/useWorkflowThumbnail'
 import { api } from '@/scripts/api'
@@ -203,6 +207,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
       openWorkflowPaths.value.push(workflow.path)
     }
     const loadedWorkflow = await workflow.load()
+    debugActivateWorkflow(loadedWorkflow.path, activeWorkflow.value?.path)
     activeWorkflow.value = loadedWorkflow
     comfyApp.canvas.bg_tint = loadedWorkflow.tintCanvasBg
 
