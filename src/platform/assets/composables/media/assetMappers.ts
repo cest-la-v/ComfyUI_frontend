@@ -75,9 +75,15 @@ export function mapInputFileToAssetItem(
   directory: 'input' | 'output' = 'input'
 ): AssetItem {
   const cleanName = stripDirectoryAnnotation(filename)
-  const params = new URLSearchParams({ filename: cleanName, type: directory })
-  const preview_url = api.apiURL(`/view?${params}`)
+  // Split "subfolder/filename.ext" — /view requires them as separate params
+  const lastSlash = cleanName.lastIndexOf('/')
+  const bareFilename = lastSlash === -1 ? cleanName : cleanName.slice(lastSlash + 1)
+  const subfolder = lastSlash === -1 ? undefined : cleanName.slice(0, lastSlash)
+  const params = subfolder
+    ? new URLSearchParams({ filename: bareFilename, subfolder, type: directory })
+    : new URLSearchParams({ filename: bareFilename, type: directory })
   appendCloudResParam(params, cleanName)
+  const url = api.apiURL(`/view?${params}`)
 
   return {
     id: `${directory}-${index}-${cleanName}`,
@@ -85,7 +91,7 @@ export function mapInputFileToAssetItem(
     size: 0,
     created_at: new Date().toISOString(),
     tags: [directory],
-    thumbnail_url: api.apiURL(`/view?${params}`),
-    preview_url
+    thumbnail_url: url,
+    preview_url: url
   }
 }
