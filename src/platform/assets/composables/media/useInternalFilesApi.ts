@@ -11,17 +11,21 @@ export function useInternalFilesApi(directory: 'input' | 'output') {
   const assetsStore = useAssetsStore()
 
   const media = computed(() =>
-    directory === 'input' ? assetsStore.inputAssets : assetsStore.historyAssets
+    directory === 'input'
+      ? assetsStore.inputAssets
+      : assetsStore.outputFileAssets
   )
 
   const loading = computed(() =>
     directory === 'input'
       ? assetsStore.inputLoading
-      : assetsStore.historyLoading
+      : assetsStore.outputFilesLoading
   )
 
   const error = computed(() =>
-    directory === 'input' ? assetsStore.inputError : assetsStore.historyError
+    directory === 'input'
+      ? assetsStore.inputError
+      : assetsStore.outputFilesError
   )
 
   const fetchMediaList = async (): Promise<AssetItem[]> => {
@@ -29,26 +33,20 @@ export function useInternalFilesApi(directory: 'input' | 'output') {
       await assetsStore.updateInputs()
       return assetsStore.inputAssets
     } else {
-      await assetsStore.updateHistory()
-      return assetsStore.historyAssets
+      await assetsStore.updateOutputFiles()
+      return assetsStore.outputFileAssets
     }
   }
 
   const refresh = () => fetchMediaList()
 
   const loadMore = async (): Promise<void> => {
-    if (directory === 'output') {
-      await assetsStore.loadMoreHistory()
-    }
+    // Output file listing returns all at once; no pagination needed
   }
 
-  const hasMore = computed(() => {
-    return directory === 'output' ? assetsStore.hasMoreHistory : false
-  })
+  const hasMore = computed(() => false)
 
-  const isLoadingMore = computed(() => {
-    return directory === 'output' ? assetsStore.isLoadingMore : false
-  })
+  const isLoadingMore = computed(() => false)
 
   return {
     media,

@@ -40,6 +40,28 @@ async function fetchInputFilesFromAPI(): Promise<AssetItem[]> {
 }
 
 /**
+ * Fetch output files from the internal API (OSS version).
+ * Returns a full recursive listing of the output directory, unlike the
+ * execution-history approach which only covers the current session.
+ */
+async function fetchOutputFilesFromAPI(): Promise<AssetItem[]> {
+  const response = await fetch(api.internalURL('/files/output'), {
+    headers: {
+      'Comfy-User': api.user
+    }
+  })
+
+  if (!response.ok) {
+    throw new Error('Failed to fetch output files')
+  }
+
+  const filenames: string[] = await response.json()
+  return filenames.map((name, index) =>
+    mapInputFileToAssetItem(name, index, 'output')
+  )
+}
+
+/**
  * Fetch input files from cloud service
  */
 async function fetchInputFilesFromCloud(): Promise<AssetItem[]> {
@@ -129,6 +151,19 @@ export const useAssetsStore = defineStore('assets', () => {
     resetOnExecute: false,
     onError: (err) => {
       console.error('Error fetching input assets:', err)
+    }
+  })
+
+  const {
+    state: outputFileAssets,
+    isLoading: outputFilesLoading,
+    error: outputFilesError,
+    execute: updateOutputFiles
+  } = useAsyncState(fetchOutputFilesFromAPI, [], {
+    immediate: false,
+    resetOnExecute: false,
+    onError: (err) => {
+      console.error('Error fetching output assets:', err)
     }
   })
 
@@ -725,10 +760,13 @@ export const useAssetsStore = defineStore('assets', () => {
     // States
     inputAssets,
     historyAssets,
+    outputFileAssets,
     inputLoading,
     historyLoading,
+    outputFilesLoading,
     inputError,
     historyError,
+    outputFilesError,
     hasMoreHistory,
     isLoadingMore,
 
@@ -740,6 +778,7 @@ export const useAssetsStore = defineStore('assets', () => {
     // Actions
     updateInputs,
     updateHistory,
+    updateOutputFiles,
     loadMoreHistory,
 
     // Input mapping helpers
