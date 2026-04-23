@@ -51,7 +51,17 @@ function getMediaUrl(
   assetKind: AssetKind | undefined
 ): string {
   if (!['image', 'video', 'audio', 'mesh'].includes(assetKind ?? '')) return ''
-  const params = new URLSearchParams({ filename, type })
+  // Split "subfolder/filename.ext" into separate params — the /view endpoint
+  // requires filename and subfolder as distinct query parameters.
+  const lastSlash = filename.lastIndexOf('/')
+  const params =
+    lastSlash === -1
+      ? new URLSearchParams({ filename, type })
+      : new URLSearchParams({
+          filename: filename.slice(lastSlash + 1),
+          subfolder: filename.slice(0, lastSlash),
+          type
+        })
   appendCloudResParam(params, filename)
   return `/api/view?${params}`
 }
