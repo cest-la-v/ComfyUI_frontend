@@ -4,7 +4,7 @@
     class="scrollbar-thin scrollbar-track-transparent scrollbar-thumb-(--dialog-surface) h-full overflow-y-auto [overflow-anchor:none] [scrollbar-gutter:stable]"
   >
     <div :style="topSpacerStyle" />
-    <div :style="mergedGridStyle">
+    <div ref="gridEl" :style="mergedGridStyle">
       <div
         v-for="(item, i) in renderedItems"
         :key="item.key"
@@ -58,7 +58,14 @@ const emit = defineEmits<{
 
 const itemHeight = ref(defaultItemHeight)
 const itemWidth = ref(defaultItemWidth)
+// Measured from the grid element's computed style to account for CSS gap and padding.
+// Without these, scroll offset and spacer height calculations drift by (rowGap * N) per N
+// skipped rows, causing items to disappear mid-scroll as the virtual window drifts ahead.
+const itemRowGap = ref(0)
+const itemPaddingTop = ref(0)
+
 const container = ref<HTMLElement | null>(null)
+const gridEl = ref<HTMLElement | null>(null)
 const { width, height } = useElementSize(container)
 const { y: scrollY } = useScroll(container, {
   throttle: scrollThrottle,
@@ -78,8 +85,19 @@ const mergedGridStyle = computed<CSSProperties>(() => {
   }
 })
 
-const viewRows = computed(() => Math.ceil(height.value / itemHeight.value))
-const offsetRows = computed(() => Math.floor(scrollY.value / itemHeight.value))
+// Effective row height includes the CSS row gap between rows.
+// Row N appears at: paddingTop + N * effectiveRowHeight (verified for any gap/padding combo).
+const effectiveRowHeight = computed(() =>
+  Math.max(1, itemHeight.value + itemRowGap.value)
+)
+const viewRows = computed(() =>
+  Math.ceil(height.value / effectiveRowHeight.value)
+)
+const offsetRows = computed(() =>
+  Math.floor(
+    Math.max(0, scrollY.value - itemPaddingTop.value) / effectiveRowHeight.value
+  )
+)
 const isValidGrid = computed(() => height.value && width.value && items?.length)
 
 const state = computed<GridState>(() => {
@@ -103,7 +121,7 @@ const renderedItems = computed(() =>
 
 function rowsToHeight(itemsCount: number): string {
   const rows = Math.ceil(itemsCount / cols.value)
-  return `${rows * itemHeight.value}px`
+  return `${rows * effectiveRowHeight.value}px`
 }
 const topSpacerStyle = computed<CSSProperties>(() => ({
   height: rowsToHeight(state.value.start)
@@ -121,8 +139,19 @@ whenever(
 
 function updateItemSize(): void {
   if (container.value) {
-    const firstItem = container.value.querySelector('[data-virtual-grid-item]')
+    // Measure row gap and padding-top from the grid element independently of item size,
+    // so these are available even during transient empty states.
+    if (gridEl.value) {
+      const style = getComputedStyle(gridEl.value)
+      const newGap = parseFloat(style.rowGap) || 0
+      const newPad = parseFloat(style.paddingTop) || 0
+      if (itemRowGap.value !== newGap) itemRowGap.value = newGap
+      if (itemPaddingTop.value !== newPad) itemPaddingTop.value = newPad
+    }
 
+    const firstItem = container.value.querySelector<HTMLElement>(
+      '[data-virtual-grid-item]'
+    )
     if (!firstItem?.clientHeight || !firstItem?.clientWidth) return
 
     if (itemHeight.value !== firstItem.clientHeight) {
